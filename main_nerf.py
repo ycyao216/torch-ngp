@@ -63,7 +63,7 @@ if __name__ == '__main__':
     parser.add_argument('--rand_pose', type=int, default=-1, help="<0 uses no rand pose, =0 only uses rand pose, >0 sample one rand pose every $ known poses")
 
     parser.add_argument('--view-dep-density', action='store_true', help="Whether to use view dependent density estimation (add view to density prediction)")
-    parser.add_argument('--exp-tag', type=str, default='ngp', help="extra tag for experiment name")
+    parser.add_argument('--exp-tag', type=str, default='view-dep-density-exp', help="extra tag for experiment name")
 
     opt = parser.parse_args()
 
