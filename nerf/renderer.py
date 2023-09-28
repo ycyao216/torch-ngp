@@ -66,6 +66,7 @@ class NeRFRenderer(nn.Module):
                  min_near=0.2,
                  density_thresh=0.01,
                  bg_radius=-1,
+                 view_dep_density=False,
                  ):
         super().__init__()
 
@@ -83,6 +84,12 @@ class NeRFRenderer(nn.Module):
         aabb_infer = aabb_train.clone()
         self.register_buffer('aabb_train', aabb_train)
         self.register_buffer('aabb_infer', aabb_infer)
+
+        self.view_dependent_density = view_dep_density
+        
+        if self.view_dependent_density:
+            # NOTE: not fully understand density cal in cuda ray mode. Disabled for now
+            cuda_ray = False 
 
         # extra state for cuda raymarching
         self.cuda_ray = cuda_ray
@@ -161,7 +168,7 @@ class NeRFRenderer(nn.Module):
         #plot_pointcloud(xyzs.reshape(-1, 3).detach().cpu().numpy())
 
         # query SDF and RGB
-        density_outputs = self.density(xyzs.reshape(-1, 3))
+        density_outputs = self.density(xyzs.reshape(-1, 3), rays_d.view(-1, 1, 3).expand_as(xyzs).reshape(-1, 3))
 
         #sigmas = density_outputs['sigma'].view(N, num_steps) # [N, T]
         for k, v in density_outputs.items():
@@ -186,7 +193,7 @@ class NeRFRenderer(nn.Module):
                 new_xyzs = torch.min(torch.max(new_xyzs, aabb[:3]), aabb[3:]) # a manual clip.
 
             # only forward new points to save computation
-            new_density_outputs = self.density(new_xyzs.reshape(-1, 3))
+            new_density_outputs = self.density(new_xyzs.reshape(-1, 3), rays_d.view(-1, 1, 3).expand_as(xyzs).reshape(-1, 3))
             #new_sigmas = new_density_outputs['sigma'].view(N, upsample_steps) # [N, t]
             for k, v in new_density_outputs.items():
                 new_density_outputs[k] = v.view(N, upsample_steps, -1)

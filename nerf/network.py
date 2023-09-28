@@ -20,20 +20,30 @@ class NeRFNetwork(NeRFRenderer):
                  num_layers_bg=2,
                  hidden_dim_bg=64,
                  bound=1,
+                 view_dep_density=False,
                  **kwargs,
                  ):
-        super().__init__(bound, **kwargs)
+        super().__init__(bound, view_dep_density=view_dep_density, **kwargs)
 
         # sigma network
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
         self.geo_feat_dim = geo_feat_dim
         self.encoder, self.in_dim = get_encoder(encoding, desired_resolution=2048 * bound)
-
+        # get encoder dimension first for direction for augmented sigma net
+        self.encoder_dir, self.in_dim_dir = get_encoder(encoding_dir)  
+        
+        # extra ablation configs
+        self.detach_d_enc = kwargs.get('detach_d_enc', True)          
+    
         sigma_net = []
         for l in range(num_layers):
             if l == 0:
                 in_dim = self.in_dim
+                # if to use view dependent density estimation 
+                if view_dep_density:
+                    # first dim is density 
+                    in_dim += self.in_dim_dir
             else:
                 in_dim = hidden_dim
             
@@ -49,7 +59,6 @@ class NeRFNetwork(NeRFRenderer):
         # color network
         self.num_layers_color = num_layers_color        
         self.hidden_dim_color = hidden_dim_color
-        self.encoder_dir, self.in_dim_dir = get_encoder(encoding_dir)
         
         color_net =  []
         for l in range(num_layers_color):
@@ -98,8 +107,17 @@ class NeRFNetwork(NeRFRenderer):
 
         # sigma
         x = self.encoder(x, bound=self.bound)
-
+        
         h = x
+        
+        if self.view_dependent_density:
+            if self.detach_d_enc:
+                with torch.no_grad():
+                    d_density = self.encoder_dir(d)
+            else:
+                d_density = self.encoder_dir(d)
+            h = torch.cat([d_density, h], dim=-1)
+            
         for l in range(self.num_layers):
             h = self.sigma_net[l](h)
             if l != self.num_layers - 1:
@@ -123,11 +141,22 @@ class NeRFNetwork(NeRFRenderer):
 
         return sigma, color
 
-    def density(self, x):
+    def density(self, x, d=None):
         # x: [N, 3], in [-bound, bound]
-
         x = self.encoder(x, bound=self.bound)
         h = x
+        if self.view_dependent_density:
+            if d is None: 
+                raise ValueError('d is None, but view_dependent_density is True')
+            if d.shape[0] != x.shape[0]:
+                raise ValueError('d.shape != x.shape in num-ray dimension')
+            if self.detach_d_enc:
+                with torch.no_grad():
+                    d = self.encoder_dir(d)
+            else:
+                d = self.encoder_dir(d)
+            h = torch.cat([d, h], dim=-1)
+
         for l in range(self.num_layers):
             h = self.sigma_net[l](h)
             if l != self.num_layers - 1:
