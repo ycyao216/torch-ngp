@@ -68,6 +68,8 @@ if __name__ == '__main__':
     parser.add_argument('--logger-type', type=str, default='tensorboardX', help="logger type, supports (tensorboard, wandb)")
     parser.add_argument('--wandb-entity', type=str, default='yunchaoy')
     parser.add_argument('--wandb-project',  type=str, default='nerf_ngp_experiments')
+    
+    parser.add_argument('--filter-key', type=str, default='bg', help="filter key for dataset")
 
 
     opt = parser.parse_args()
@@ -163,7 +165,7 @@ if __name__ == '__main__':
 
         optimizer = lambda model: torch.optim.Adam(model.get_params(opt.lr), betas=(0.9, 0.99), eps=1e-15)
 
-        train_loader = NeRFDataset(opt, device=device, type='train').dataloader()
+        train_loader = NeRFDataset(opt, device=device, type='train', filter_key=opt.filter_key).dataloader()
 
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
@@ -176,13 +178,13 @@ if __name__ == '__main__':
             gui.render()
         
         else:
-            valid_loader = NeRFDataset(opt, device=device, type='val', downscale=1).dataloader()
+            valid_loader = NeRFDataset(opt, device=device, type='val', downscale=1, filter_key=opt.filter_key).dataloader()
 
             max_epoch = np.ceil(opt.iters / len(train_loader)).astype(np.int32)
             trainer.train(train_loader, valid_loader, max_epoch)
 
             # also test
-            test_loader = NeRFDataset(opt, device=device, type='test').dataloader()
+            test_loader = NeRFDataset(opt, device=device, type='test',filter_key=opt.filter_key).dataloader()
             
             if test_loader.has_gt:
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.

@@ -92,7 +92,7 @@ def rand_poses(size, device, radius=1, theta_range=[np.pi/3, 2*np.pi/3], phi_ran
 
 
 class NeRFDataset:
-    def __init__(self, opt, device, type='train', downscale=1, n_test=10):
+    def __init__(self, opt, device, type='train', downscale=1, n_test=10, filter_key=[]):
         super().__init__()
         
         self.opt = opt
@@ -110,6 +110,11 @@ class NeRFDataset:
         self.num_rays = self.opt.num_rays if self.training else -1
 
         self.rand_pose = opt.rand_pose
+        
+        # filter out some frames based on key
+        self.filter_key = filter_key
+        if not isinstance(self.filter_key, list):
+            self.filter_key = [self.filter_key]
 
         # auto-detect transforms.json and split mode.
         if os.path.exists(os.path.join(self.root_path, 'transforms.json')):
@@ -193,35 +198,36 @@ class NeRFDataset:
             self.poses = []
             self.images = []
             for f in tqdm.tqdm(frames, desc=f'Loading {type} data'):
-                f_path = os.path.join(self.root_path, f['file_path'])
-                if self.mode == 'blender' and '.' not in os.path.basename(f_path):
-                    f_path += '.png' # so silly...
+                if not "type" in f or f["type"] not in self.filter_key: 
+                    f_path = os.path.join(self.root_path, f['file_path'])
+                    if self.mode == 'blender' and '.' not in os.path.basename(f_path):
+                        f_path += '.png' # so silly...
 
-                # there are non-exist paths in fox...
-                if not os.path.exists(f_path):
-                    continue
-                
-                pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
-                pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
-
-                image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
-                if self.H is None or self.W is None:
-                    self.H = image.shape[0] // downscale
-                    self.W = image.shape[1] // downscale
-
-                # add support for the alpha channel as a mask.
-                if image.shape[-1] == 3: 
-                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                else:
-                    image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
-
-                if image.shape[0] != self.H or image.shape[1] != self.W:
-                    image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
+                    # there are non-exist paths in fox...
+                    if not os.path.exists(f_path):
+                        continue
                     
-                image = image.astype(np.float32) / 255 # [H, W, 3/4]
+                    pose = np.array(f['transform_matrix'], dtype=np.float32) # [4, 4]
+                    pose = nerf_matrix_to_ngp(pose, scale=self.scale, offset=self.offset)
 
-                self.poses.append(pose)
-                self.images.append(image)
+                    image = cv2.imread(f_path, cv2.IMREAD_UNCHANGED) # [H, W, 3] o [H, W, 4]
+                    if self.H is None or self.W is None:
+                        self.H = image.shape[0] // downscale
+                        self.W = image.shape[1] // downscale
+
+                    # add support for the alpha channel as a mask.
+                    if image.shape[-1] == 3: 
+                        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    else:
+                        image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+
+                    if image.shape[0] != self.H or image.shape[1] != self.W:
+                        image = cv2.resize(image, (self.W, self.H), interpolation=cv2.INTER_AREA)
+                        
+                    image = image.astype(np.float32) / 255 # [H, W, 3/4]
+
+                    self.poses.append(pose)
+                    self.images.append(image)
             
         self.poses = torch.from_numpy(np.stack(self.poses, axis=0)) # [N, 4, 4]
         if self.images is not None:
