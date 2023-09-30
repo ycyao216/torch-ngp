@@ -72,6 +72,8 @@ if __name__ == '__main__':
 
     opt = parser.parse_args()
 
+    opt.workspace = os.path.join(opt.workspace, opt.exp_tag)
+
     if opt.O:
         opt.fp16 = True
         opt.cuda_ray = True
