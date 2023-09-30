@@ -65,6 +65,11 @@ if __name__ == '__main__':
     parser.add_argument('--view-dep-density', action='store_true', help="Whether to use view dependent density estimation (add view to density prediction)")
     parser.add_argument('--exp-tag', type=str, default='view-dep-density-exp', help="extra tag for experiment name")
 
+    parser.add_argument('--logger-type', type=str, default='tensorboardX', help="logger type, supports (tensorboard, wandb)")
+    parser.add_argument('--wandb-entity', type=str, default='yunchaoy')
+    parser.add_argument('--wandb-project',  type=str, default='nerf_ngp_experiments')
+
+
     opt = parser.parse_args()
 
     if opt.O:
@@ -91,6 +96,27 @@ if __name__ == '__main__':
 
     print(opt)
     
+    logger_kwargs = dict()
+    if opt.logger_type == 'wandb':
+        wandb_kwargs = dict()
+        wandb_kwargs['entity'] = opt.wandb_entity
+        wandb_kwargs['project'] = opt.wandb_project
+        if not opt.wandb_entity:
+            wandb_kwargs['entity'] = 'ycyao216'
+        if not opt.wandb_project:
+            wandb_kwargs['project'] = 'torch-ngp'
+        wandb_kwargs['name'] = opt.exp_tag
+        wandb_kwargs['config'] = opt
+        logger_kwargs["wandb_kwargs"] = wandb_kwargs
+        logger_kwargs["use_tensorboardX"] = False 
+        logger_kwargs["use_wandb"] = True
+    elif opt.logger_type == 'tensorboardX':
+        logger_kwargs["use_tensorboardX"] = True 
+        logger_kwargs["use_wandb"] = False
+    else:
+        logger_kwargs["use_tensorboardX"] = False
+        logger_kwargs["use_wandb"] = False
+    
     seed_everything(opt.seed)
 
     model = NeRFNetwork(
@@ -114,8 +140,8 @@ if __name__ == '__main__':
     
     if opt.test:
         
-        metrics = [PSNRMeter(), LPIPSMeter(device=device)]
-        trainer = Trainer(opt.exp_tag, opt, model, device=device, workspace=opt.workspace, criterion=criterion, fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt)
+        metrics = [PSNRMeter(is_wandb=logger_kwargs['use_wandb']), LPIPSMeter(device=device,is_wandb=logger_kwargs['use_wandb'])]
+        trainer = Trainer(opt.exp_tag, opt, model, device=device, workspace=opt.workspace, criterion=criterion, fp16=opt.fp16, metrics=metrics, use_checkpoint=opt.ckpt, **logger_kwargs)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer)
@@ -140,8 +166,8 @@ if __name__ == '__main__':
         # decay to 0.1 * init_lr at last iter step
         scheduler = lambda optimizer: optim.lr_scheduler.LambdaLR(optimizer, lambda iter: 0.1 ** min(iter / opt.iters, 1))
 
-        metrics = [PSNRMeter(), LPIPSMeter(device=device)]
-        trainer = Trainer(opt.exp_tag, opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, eval_interval=50)
+        metrics = [PSNRMeter(is_wandb=logger_kwargs['use_wandb']),LPIPSMeter(device=device,is_wandb=logger_kwargs['use_wandb'])]
+        trainer = Trainer(opt.exp_tag, opt, model, device=device, workspace=opt.workspace, optimizer=optimizer, criterion=criterion, ema_decay=0.95, fp16=opt.fp16, lr_scheduler=scheduler, scheduler_update_every_step=True, metrics=metrics, use_checkpoint=opt.ckpt, eval_interval=5, **logger_kwargs)
 
         if opt.gui:
             gui = NeRFGUI(opt, trainer, train_loader)

@@ -32,6 +32,8 @@ from packaging import version as pver
 import lpips
 from torchmetrics.functional import structural_similarity_index_measure
 
+import wandb 
+
 def custom_meshgrid(*args):
     # ref: https://pytorch.org/docs/stable/generated/torch.meshgrid.html?highlight=meshgrid#torch.meshgrid
     if pver.parse(torch.__version__) < pver.parse('1.10'):
@@ -202,13 +204,42 @@ def extract_geometry(bound_min, bound_max, resolution, threshold, query_func):
     vertices = vertices / (resolution - 1.0) * (b_max_np - b_min_np)[None, :] + b_min_np[None, :]
     return vertices, triangles
 
-
-class PSNRMeter:
-    def __init__(self):
+class NerfMeter:
+    def __init__(self, is_wandb, name):
+        self.is_wandb = is_wandb
+        self.name = name 
+        self.for_train = True 
+    
+    def clear(self):
         self.V = 0
         self.N = 0
+        
+    def prepare_inputs(self, *inputs):
+        raise NotImplementedError
+    
+    def update(self, preds, truths):
+        raise NotImplementedError
+    
+    def measure(self):
+        raise NotImplementedError
+    
+    def write(self, writer, global_step, prefix=""):
+        if self.use_wandb:
+            # wandb log should not be written multiple times in the same epoch.
+            self.log(f"[WARNING] Using W&B. Write should not be called. {self.name} : {self.measure()} at step {global_step} is skipped.")
+            return 
+        writer.add_scalar(os.path.join(prefix, self.name), self.measure(), global_step)
+            
+            
+    def report(self):
+        return f'{self.name} = {self.measure():.6f}'
+    
+    def report_dict(self, prefix):
+        return {os.path.join(prefix, self.name): self.measure()}
 
-    def clear(self):
+class PSNRMeter(NerfMeter):
+    def __init__(self, is_wandb=False):
+        super().__init__(is_wandb=is_wandb, name=f'PSNR')
         self.V = 0
         self.N = 0
 
@@ -233,23 +264,14 @@ class PSNRMeter:
     def measure(self):
         return self.V / self.N
 
-    def write(self, writer, global_step, prefix=""):
-        writer.add_scalar(os.path.join(prefix, "PSNR"), self.measure(), global_step)
 
-    def report(self):
-        return f'PSNR = {self.measure():.6f}'
-
-
-class SSIMMeter:
-    def __init__(self, device=None):
+class SSIMMeter(NerfMeter):
+    def __init__(self, device=None, is_wandb=False):
+        super().__init__(is_wandb=is_wandb, name=f'SSIM')
         self.V = 0
         self.N = 0
 
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    def clear(self):
-        self.V = 0
-        self.N = 0
 
     def prepare_inputs(self, *inputs):
         outputs = []
@@ -270,25 +292,17 @@ class SSIMMeter:
     def measure(self):
         return self.V / self.N
 
-    def write(self, writer, global_step, prefix=""):
-        writer.add_scalar(os.path.join(prefix, "SSIM"), self.measure(), global_step)
-
-    def report(self):
-        return f'SSIM = {self.measure():.6f}'
-
-
-class LPIPSMeter:
-    def __init__(self, net='alex', device=None):
+class LPIPSMeter(NerfMeter):
+    def __init__(self, net='alex', device=None, is_wandb=False):
+        super().__init__(is_wandb=is_wandb, name=f'LPIPS')
         self.V = 0
         self.N = 0
         self.net = net
+        # using this loss on traing data leads to error.
+        self.for_train=False 
 
         self.device = device if device is not None else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.fn = lpips.LPIPS(net=net).eval().to(self.device)
-
-    def clear(self):
-        self.V = 0
-        self.N = 0
 
     def prepare_inputs(self, *inputs):
         outputs = []
@@ -307,11 +321,11 @@ class LPIPSMeter:
     def measure(self):
         return self.V / self.N
 
-    def write(self, writer, global_step, prefix=""):
-        writer.add_scalar(os.path.join(prefix, f"LPIPS ({self.net})"), self.measure(), global_step)
-
     def report(self):
         return f'LPIPS ({self.net}) = {self.measure():.6f}'
+    
+    def report_dict(self, prefix=""):
+        return {os.path.join(prefix, f'LPIPS ({self.net})'): self.measure()}
 
 class Trainer(object):
     def __init__(self, 
@@ -333,12 +347,16 @@ class Trainer(object):
                  workspace='workspace', # workspace to save logs & ckpts
                  best_mode='min', # the smaller/larger result, the better
                  use_loss_as_metric=True, # use loss as the first metric
-                 report_metric_at_train=False, # also report metrics at training
+                 report_metric_at_train=True, # also report metrics at training
                  use_checkpoint="latest", # which ckpt to use at init time
                  use_tensorboardX=True, # whether to use tensorboard for logging
+                 use_wandb=False,
                  scheduler_update_every_step=False, # whether to call scheduler.step() after every train step
+                 wandb_kwargs=None 
                  ):
         
+        self.wandb_kwargs = wandb_kwargs
+        self.use_wandb = use_wandb
         self.name = name
         self.opt = opt
         self.mute = mute
@@ -635,6 +653,9 @@ class Trainer(object):
         if self.use_tensorboardX and self.local_rank == 0:
             self.writer = tensorboardX.SummaryWriter(os.path.join(self.workspace, "run", self.name))
 
+        if self.use_wandb and self.local_rank == 0 and self.wandb_kwargs is not None:
+            self.writer = wandb.init(dir= self.workspace, **self.wandb_kwargs)
+
         # mark untrained region (i.e., not covered by any camera from the training dataset)
         if self.model.cuda_ray:
             self.model.mark_untrained_grid(train_loader._data.poses, train_loader._data.intrinsics)
@@ -645,14 +666,18 @@ class Trainer(object):
         for epoch in range(self.epoch + 1, max_epochs + 1):
             self.epoch = epoch
 
-            self.train_one_epoch(train_loader)
+            ret = self.train_one_epoch(train_loader)
 
             if self.workspace is not None and self.local_rank == 0:
                 self.save_checkpoint(full=True, best=False)
-
+            eval_ret = {}
             if self.epoch % self.eval_interval == 0:
-                self.evaluate_one_epoch(valid_loader)
+                eval_ret = self.evaluate_one_epoch(valid_loader)
                 self.save_checkpoint(full=False, best=True)
+                
+            ret.update(eval_ret)
+            if len(ret) > 0 and self.use_wandb:
+                self.writer.log(ret, step=self.epoch, commit=True)
 
         if self.use_tensorboardX and self.local_rank == 0:
             self.writer.close()
@@ -876,7 +901,8 @@ class Trainer(object):
             if self.local_rank == 0:
                 if self.report_metric_at_train:
                     for metric in self.metrics:
-                        metric.update(preds, truths)
+                        if metric.for_train:
+                            metric.update(preds, truths)
                         
                 if self.use_tensorboardX:
                     self.writer.add_scalar("train/loss", loss_val, self.global_step)
@@ -894,15 +920,23 @@ class Trainer(object):
         average_loss = total_loss / self.local_step
         self.stats["loss"].append(average_loss)
 
+        wandb_return = {}
         if self.local_rank == 0:
             pbar.close()
             if self.report_metric_at_train:
                 for metric in self.metrics:
-                    self.log(metric.report(), style="red")
-                    if self.use_tensorboardX:
-                        metric.write(self.writer, self.epoch, prefix="train")
+                    if metric.for_train:
+                        self.log(metric.report(), style="red")
+                        if self.use_tensorboardX:
+                            metric.write(self.writer, self.epoch, prefix="train")
+                        if self.use_wandb:
+                            wandb_return.update(metric.report_dict(prefix="train"))
                     metric.clear()
+            if self.use_wandb:
+                wandb_return.update({"train/epoch_avg_loss": average_loss, "train/lr": self.optimizer.param_groups[0]['lr'], "epoch": self.epoch})
 
+                # wandb.log({"train/epoch_avg_loss": average_loss, "train/lr": self.optimizer.param_groups[0]['lr']}, step=self.epoch, commit=True)
+                    
         if not self.scheduler_update_every_step:
             if isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                 self.lr_scheduler.step(average_loss)
@@ -910,6 +944,8 @@ class Trainer(object):
                 self.lr_scheduler.step()
 
         self.log(f"==> Finished Epoch {self.epoch}.")
+        
+        return wandb_return
 
 
     def evaluate_one_epoch(self, loader, name=None):
@@ -993,6 +1029,7 @@ class Trainer(object):
         average_loss = total_loss / self.local_step
         self.stats["valid_loss"].append(average_loss)
 
+        wandb_return = {}
         if self.local_rank == 0:
             pbar.close()
             if not self.use_loss_as_metric and len(self.metrics) > 0:
@@ -1005,12 +1042,16 @@ class Trainer(object):
                 self.log(metric.report(), style="blue")
                 if self.use_tensorboardX:
                     metric.write(self.writer, self.epoch, prefix="evaluate")
+                if self.use_wandb:
+                    wandb_return.update(metric.report_dict(prefix="evaluate"))
                 metric.clear()
 
         if self.ema is not None:
             self.ema.restore()
 
         self.log(f"++> Evaluate epoch {self.epoch} Finished.")
+        
+        return wandb_return
 
     def save_checkpoint(self, name=None, full=False, best=False, remove_old=True):
 
