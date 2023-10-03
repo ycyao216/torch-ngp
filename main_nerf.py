@@ -62,9 +62,10 @@ if __name__ == '__main__':
     parser.add_argument('--clip_text', type=str, default='', help="text input for CLIP guidance")
     parser.add_argument('--rand_pose', type=int, default=-1, help="<0 uses no rand pose, =0 only uses rand pose, >0 sample one rand pose every $ known poses")
 
-    parser.add_argument('--view-dep-density', action='store_true', help="Whether to use view dependent density estimation (add view to density prediction)")
+    parser.add_argument('--view-dep-density', action='store_true', help="Whether to use view d\ependent density estimation (add view to density prediction)")
+    parser.add_argument('--vdd-cuda-mode', type=str, default='cas_sphere', help="The sampling type to sample view for the cascaded xyzs in cuda ray mode")
+    
     parser.add_argument('--exp-tag', type=str, default='view-dep-density-exp', help="extra tag for experiment name")
-
     parser.add_argument('--logger-type', type=str, default='tensorboardX', help="logger type, supports (tensorboard, wandb)")
     parser.add_argument('--wandb-entity', type=str, default='yunchaoy')
     parser.add_argument('--wandb-project',  type=str, default='nerf_ngp_experiments')
@@ -132,6 +133,7 @@ if __name__ == '__main__':
         density_thresh=opt.density_thresh,
         bg_radius=opt.bg_radius,
         view_dep_density=opt.view_dep_density,
+        vdd_cuda_mode=opt.vdd_cuda_mode,
     )
     
     print(model)

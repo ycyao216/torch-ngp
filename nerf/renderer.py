@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 import raymarching
 from .utils import custom_meshgrid
+from .provider import rand_poses
 
 def sample_pdf(bins, weights, n_samples, det=False):
     # This implementation is from NeRF
@@ -67,6 +68,7 @@ class NeRFRenderer(nn.Module):
                  density_thresh=0.01,
                  bg_radius=-1,
                  view_dep_density=False,
+                 vdd_cuda_mode="cas_sphere",
                  ):
         super().__init__()
 
@@ -85,11 +87,8 @@ class NeRFRenderer(nn.Module):
         self.register_buffer('aabb_train', aabb_train)
         self.register_buffer('aabb_infer', aabb_infer)
 
-        self.view_dependent_density = view_dep_density
-        
-        if self.view_dependent_density:
-            # NOTE: not fully understand density cal in cuda ray mode. Disabled for now
-            cuda_ray = False 
+        self.view_dep_density = view_dep_density
+        self.vdd_cuda_mode = vdd_cuda_mode
 
         # extra state for cuda raymarching
         self.cuda_ray = cuda_ray
@@ -449,7 +448,7 @@ class NeRFRenderer(nn.Module):
         print(f'[mark untrained grid] {(count == 0).sum()} from {self.grid_size ** 3 * self.cascade}')
 
     @torch.no_grad()
-    def update_extra_state(self, decay=0.95, S=128):
+    def update_extra_state(self, decay=0.95, S=128, dataset = None):
         # call before each epoch to update extra states.
 
         if not self.cuda_ray:
@@ -484,8 +483,23 @@ class NeRFRenderer(nn.Module):
                             cas_xyzs = xyzs * (bound - half_grid_size)
                             # add noise in [-hgs, hgs]
                             cas_xyzs += (torch.rand_like(cas_xyzs) * 2 - 1) * half_grid_size
-                            # query density
-                            sigmas = self.density(cas_xyzs)['sigma'].reshape(-1).detach()
+                            # sample from a sphere with radius min_near away from the tip of cube
+                            if self.view_dep_density:
+                                if self.vdd_cuda_mode == "cas_sphere":
+                                    radius = torch.norm(cas_xyzs.max(dim=0)[0]) + self.min_near
+                                    ray_o = rand_poses(cas_xyzs.shape[0], device = self.density_bitfield.device, radius=radius)[:,:3,3]
+                                    ray_d = (cas_xyzs - ray_o) / torch.norm(cas_xyzs - ray_o)            
+                                elif self.vdd_cuda_mode == "from_data":
+                                    if dataset is None:
+                                        raise ValueError("dataset is None, cannot sample")
+                                    pass 
+                                else: 
+                                    # fully random sample 
+                                    ray_d = torch.randn_like(cas_xyzs)         
+                                sigmas = self.density(cas_xyzs, ray_d)['sigma'].reshape(-1).detach()
+                            else:
+                                # query density
+                                sigmas = self.density(cas_xyzs)['sigma'].reshape(-1).detach()
                             sigmas *= self.density_scale
                             # assign 
                             tmp_grid[cas, indices] = sigmas
@@ -515,7 +529,22 @@ class NeRFRenderer(nn.Module):
                 # add noise in [-hgs, hgs]
                 cas_xyzs += (torch.rand_like(cas_xyzs) * 2 - 1) * half_grid_size
                 # query density
-                sigmas = self.density(cas_xyzs)['sigma'].reshape(-1).detach()
+                if self.view_dep_density:
+                    if self.vdd_cuda_mode == "cas_sphere":
+                        radius = torch.norm(cas_xyzs.max(dim=0)[0]) + self.min_near
+                        ray_o = rand_poses(cas_xyzs.shape[0], device = self.density_bitfield.device, radius=radius)[:,:3,3]
+                        ray_d = (cas_xyzs - ray_o) / torch.norm(cas_xyzs - ray_o)            
+                    elif self.vdd_cuda_mode == "from_data":
+                        if dataset is None:
+                            raise ValueError("dataset is None, cannot sample")
+                        pass 
+                    else: 
+                        # fully random sample 
+                        ray_d = torch.randn_like(cas_xyzs)         
+                    sigmas = self.density(cas_xyzs, ray_d)['sigma'].reshape(-1).detach()
+                else:
+                    # query density
+                    sigmas = self.density(cas_xyzs)['sigma'].reshape(-1).detach()
                 sigmas *= self.density_scale
                 # assign 
                 tmp_grid[cas, indices] = sigmas

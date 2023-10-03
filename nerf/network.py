@@ -20,10 +20,11 @@ class NeRFNetwork(NeRFRenderer):
                  num_layers_bg=2,
                  hidden_dim_bg=64,
                  bound=1,
-                 view_dep_density=False,
+                #  view_dep_density=False,
+                #  vdd_cuda_mode="cas_sphere",
                  **kwargs,
                  ):
-        super().__init__(bound, view_dep_density=view_dep_density, **kwargs)
+        super().__init__(bound, **kwargs)
 
         # sigma network
         self.num_layers = num_layers
@@ -41,7 +42,7 @@ class NeRFNetwork(NeRFRenderer):
             if l == 0:
                 in_dim = self.in_dim
                 # if to use view dependent density estimation 
-                if view_dep_density:
+                if self.view_dep_density:
                     # first dim is density 
                     in_dim += self.in_dim_dir
             else:
@@ -110,7 +111,7 @@ class NeRFNetwork(NeRFRenderer):
         
         h = x
         
-        if self.view_dependent_density:
+        if self.view_dep_density:
             if self.detach_d_enc:
                 with torch.no_grad():
                     d_density = self.encoder_dir(d)
@@ -145,9 +146,9 @@ class NeRFNetwork(NeRFRenderer):
         # x: [N, 3], in [-bound, bound]
         x = self.encoder(x, bound=self.bound)
         h = x
-        if self.view_dependent_density:
+        if self.view_dep_density:
             if d is None: 
-                raise ValueError('d is None, but view_dependent_density is True')
+                raise ValueError('d is None, but view_dep_density is True')
             if d.shape[0] != x.shape[0]:
                 raise ValueError('d.shape != x.shape in num-ray dimension')
             if self.detach_d_enc:
