@@ -448,7 +448,7 @@ class NeRFRenderer(nn.Module):
         print(f'[mark untrained grid] {(count == 0).sum()} from {self.grid_size ** 3 * self.cascade}')
 
     @torch.no_grad()
-    def update_extra_state(self, decay=0.95, S=128, dataset = None):
+    def update_extra_state(self, decay=0.95, S=128, train_ray_dist = None):
         # call before each epoch to update extra states.
 
         if not self.cuda_ray:
@@ -490,9 +490,9 @@ class NeRFRenderer(nn.Module):
                                     ray_o = rand_poses(cas_xyzs.shape[0], device = self.density_bitfield.device, radius=radius)[:,:3,3]
                                     ray_d = (cas_xyzs - ray_o) / torch.norm(cas_xyzs - ray_o)            
                                 elif self.vdd_cuda_mode == "from_data":
-                                    if dataset is None:
-                                        raise ValueError("dataset is None, cannot sample")
-                                    pass 
+                                    if train_ray_dist is None:
+                                        raise ValueError("ray distribution is None, cannot sample")
+                                    ray_d = train_ray_dist.sample((cas_xyzs.shape[0],))
                                 else: 
                                     # fully random sample 
                                     ray_d = torch.randn_like(cas_xyzs)         
@@ -535,9 +535,9 @@ class NeRFRenderer(nn.Module):
                         ray_o = rand_poses(cas_xyzs.shape[0], device = self.density_bitfield.device, radius=radius)[:,:3,3]
                         ray_d = (cas_xyzs - ray_o) / torch.norm(cas_xyzs - ray_o)            
                     elif self.vdd_cuda_mode == "from_data":
-                        if dataset is None:
-                            raise ValueError("dataset is None, cannot sample")
-                        pass 
+                        if train_ray_dist is None:
+                            raise ValueError("ray distribution is None, cannot sample")
+                        ray_d = train_ray_dist.sample((cas_xyzs.shape[0],))
                     else: 
                         # fully random sample 
                         ray_d = torch.randn_like(cas_xyzs)         

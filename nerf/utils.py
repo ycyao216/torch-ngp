@@ -649,7 +649,7 @@ class Trainer(object):
 
     ### ------------------------------
 
-    def train(self, train_loader, valid_loader, max_epochs):
+    def train(self, train_loader, valid_loader, max_epochs, train_ray_dist = None):
         if self.use_tensorboardX and self.local_rank == 0:
             self.writer = tensorboardX.SummaryWriter(os.path.join(self.workspace, "run", self.name))
 
@@ -666,7 +666,7 @@ class Trainer(object):
         for epoch in range(self.epoch + 1, max_epochs + 1):
             self.epoch = epoch
 
-            ret = self.train_one_epoch(train_loader)
+            ret = self.train_one_epoch(train_loader, train_ray_dist)
 
             if self.workspace is not None and self.local_rank == 0:
                 self.save_checkpoint(full=True, best=False)
@@ -740,7 +740,7 @@ class Trainer(object):
         self.log(f"==> Finished Test.")
     
     # [GUI] just train for 16 steps, without any other overhead that may slow down rendering.
-    def train_gui(self, train_loader, step=16):
+    def train_gui(self, train_loader, step=16, train_ray_dist=None):
 
         self.model.train()
 
@@ -764,7 +764,7 @@ class Trainer(object):
             # update grid every 16 steps
             if self.model.cuda_ray and self.global_step % self.opt.update_extra_interval == 0:
                 with torch.cuda.amp.autocast(enabled=self.fp16):
-                    self.model.update_extra_state()
+                    self.model.update_extra_state(train_ray_dist = train_ray_dist)
             
             self.global_step += 1
 
@@ -853,7 +853,7 @@ class Trainer(object):
 
         return outputs
 
-    def train_one_epoch(self, loader):
+    def train_one_epoch(self, loader, train_ray_dist=None):
         self.log(f"==> Start Training Epoch {self.epoch}, lr={self.optimizer.param_groups[0]['lr']:.6f} ...")
 
         total_loss = 0
@@ -878,7 +878,7 @@ class Trainer(object):
             # update grid every 16 steps
             if self.model.cuda_ray and self.global_step % self.opt.update_extra_interval == 0:
                 with torch.cuda.amp.autocast(enabled=self.fp16):
-                    self.model.update_extra_state()
+                    self.model.update_extra_state(train_ray_dist=train_ray_dist)
                     
             self.local_step += 1
             self.global_step += 1

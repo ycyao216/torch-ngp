@@ -278,8 +278,14 @@ class NeRFDataset:
         cy = (transform['cy'] / downscale) if 'cy' in transform else (self.H / 2)
     
         self.intrinsics = np.array([fl_x, fl_y, cx, cy])
-
-
+        
+        all_rays = get_rays(self.poses, self.intrinsics, self.H, self.W, 0, None, self.opt.patch_size)
+        
+        mean = all_rays["rays_d"].view(-1,3).mean(dim=0).to(self.device)
+        std = all_rays["rays_d"].view(-1,3).std(dim=0).to(self.device)
+        
+        self.rays_d_dist = torch.distributions.normal.Normal(mean, std)
+        
     def collate(self, index):
 
         B = len(index) # a list of length 1
