@@ -579,9 +579,9 @@ class Trainer(object):
         # loss_ws = - 1e-1 * pred_weights_sum * torch.log(pred_weights_sum) # entropy to encourage weights_sum to be 0 or 1.
         # loss = loss + loss_ws.mean()
 
-        return pred_rgb, gt_rgb, loss
+        return pred_rgb, gt_rgb, loss 
 
-    def eval_step(self, data):
+    def eval_step(self, data,return_dex_raw=False):
 
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
@@ -605,10 +605,16 @@ class Trainer(object):
 
         loss = self.criterion(pred_rgb, gt_rgb).mean()
 
-        return pred_rgb, pred_depth, gt_rgb, loss
+        result = pred_rgb, pred_depth, gt_rgb, loss
+        
+        if return_dex_raw:
+            pred_dex_depth = outputs['dex_depth_raw'].reshape(B, H, W)
+            result += (pred_dex_depth,)
+            
+        return result 
 
     # moved out bg_color and perturb for more flexible control...
-    def test_step(self, data, bg_color=None, perturb=False):  
+    def test_step(self, data, bg_color=None, perturb=False, return_dex=False, D_thresh = None, return_dex_raw=False):  
 
         rays_o = data['rays_o'] # [B, N, 3]
         rays_d = data['rays_d'] # [B, N, 3]
@@ -617,13 +623,20 @@ class Trainer(object):
         if bg_color is not None:
             bg_color = bg_color.to(self.device)
 
-        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=perturb, **vars(self.opt))
+        outputs = self.model.render(rays_o, rays_d, staged=True, bg_color=bg_color, perturb=perturb,d_thresh_force=D_thresh, **vars(self.opt))
 
         pred_rgb = outputs['image'].reshape(-1, H, W, 3)
         pred_depth = outputs['depth'].reshape(-1, H, W)
 
-        return pred_rgb, pred_depth
+        result = (pred_rgb, pred_depth)
 
+        if return_dex:
+            pred_dex_depth = outputs['dex_depth'].reshape(-1, H, W)
+            result += (pred_dex_depth,)
+            
+        if return_dex_raw:
+            result += (outputs['dex_depth_raw'].reshape(-1, H, W),)
+        return result
 
     def save_mesh(self, save_path=None, resolution=256, threshold=10):
 
@@ -705,13 +718,16 @@ class Trainer(object):
         if write_video:
             all_preds = []
             all_preds_depth = []
+        all_preds_dex_depth = []
+        all_preds_dex_raw = []
+
 
         with torch.no_grad():
 
             for i, data in enumerate(loader):
                 
                 with torch.cuda.amp.autocast(enabled=self.fp16):
-                    preds, preds_depth = self.test_step(data)
+                    preds, preds_depth, preds_dex_depth, dex_raw = self.test_step(data,return_dex=True,D_thresh=self.opt.d_thresh,return_dex_raw=True)
 
                 if self.opt.color_space == 'linear':
                     preds = linear_to_srgb(preds)
@@ -722,19 +738,44 @@ class Trainer(object):
                 pred_depth = preds_depth[0].detach().cpu().numpy()
                 pred_depth = (pred_depth * 255).astype(np.uint8)
 
+
+                preds_dex_depth = preds_dex_depth[0].detach().cpu().numpy()              
+                preds_dex_depth = (preds_dex_depth * 255).astype(np.uint8)
+
+                preds_dex_raw = dex_raw[0].detach().cpu().numpy()
+                all_preds_dex_raw.append(preds_dex_raw)
+
                 if write_video:
                     all_preds.append(pred)
                     all_preds_depth.append(pred_depth)
+                    all_preds_dex_depth.append(preds_dex_depth)
+
                 else:
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_rgb.png'), cv2.cvtColor(pred, cv2.COLOR_RGB2BGR))
                     cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_depth.png'), pred_depth)
+                    cv2.imwrite(os.path.join(save_path, f'{name}_{i:04d}_dex_depth.png'), preds_dex_depth)
 
                 pbar.update(loader.batch_size)
-        
+        np.savez(os.path.join(save_path, 'dex.npz'),dex_depth=all_preds_dex_raw,rgb=pred)
+
+        path = os.path.join(self.workspace, 'val', 'depth_{}.npz'.format(self.global_step))
+        if os.path.exists(path):
+            old_data = np.load(path)
+            old_time = old_data['time']
+            np.savez(path,dex_depth=all_preds_dex_raw,rgb=pred,time=old_time)
+        else:
+            if self.training_time is not None:
+                # check if folder exists 
+                if not os.path.exists(os.path.join(self.workspace, 'val')):
+                    os.makedirs(os.path.join(self.workspace, 'val'))
+                np.savez(path,dex_depth=all_preds_dex_raw,rgb=pred,time=self.training_time)
+
         if write_video:
             all_preds = np.stack(all_preds, axis=0)
+            all_preds_dex_depth = np.stack(all_preds_dex_depth, axis=0)
             all_preds_depth = np.stack(all_preds_depth, axis=0)
             imageio.mimwrite(os.path.join(save_path, f'{name}_rgb.mp4'), all_preds, fps=25, quality=8, macro_block_size=1)
+            imageio.mimwrite(os.path.join(save_path, f'{name}_dex_depth.mp4'), all_preds_dex_depth, fps=25, quality=8, macro_block_size=1)
             imageio.mimwrite(os.path.join(save_path, f'{name}_depth.mp4'), all_preds_depth, fps=25, quality=8, macro_block_size=1)
 
         self.log(f"==> Finished Test.")

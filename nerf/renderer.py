@@ -69,6 +69,7 @@ class NeRFRenderer(nn.Module):
                  bg_radius=-1,
                  view_dep_density=False,
                  vdd_cuda_mode="cas_sphere",
+                 show_dex_depth=True,
                  ):
         super().__init__()
 
@@ -89,6 +90,7 @@ class NeRFRenderer(nn.Module):
 
         self.view_dep_density = view_dep_density
         self.vdd_cuda_mode = vdd_cuda_mode
+        self.show_dex_depth = show_dex_depth
 
         # extra state for cuda raymarching
         self.cuda_ray = cuda_ray
@@ -259,7 +261,7 @@ class NeRFRenderer(nn.Module):
         }
 
 
-    def run_cuda(self, rays_o, rays_d, dt_gamma=0, bg_color=None, perturb=False, force_all_rays=False, max_steps=1024, T_thresh=1e-4, **kwargs):
+    def run_cuda(self, rays_o, rays_d, dt_gamma=0, bg_color=None, perturb=False, force_all_rays=False, max_steps=1024, T_thresh=1e-4, D_thresh=10.0, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # return: image: [B, N, 3], depth: [B, N]
 
@@ -305,25 +307,33 @@ class NeRFRenderer(nn.Module):
             if len(sigmas.shape) == 2:
                 K = sigmas.shape[0]
                 depths = []
+                dex_depths = []
                 images = []
                 for k in range(K):
-                    weights_sum, depth, image = raymarching.composite_rays_train(sigmas[k], rgbs[k], deltas, rays, T_thresh)
+                    weights_sum, depth, image, dex_depth = raymarching.composite_rays_train(sigmas[k], rgbs[k], deltas, rays, T_thresh, D_thresh, True)
                     image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
                     depth = torch.clamp(depth - nears, min=0) / (fars - nears)
+                    dex_depth = torch.clamp(dex_depth - nears, min=0) / (fars - nears)
                     images.append(image.view(*prefix, 3))
                     depths.append(depth.view(*prefix))
+                    dex_depths.append(dex_depth.view(*prefix))
             
                 depth = torch.stack(depths, axis=0) # [K, B, N]
+                dex_depth = torch.stack(dex_depths, axis=0) # [K, B, N]
                 image = torch.stack(images, axis=0) # [K, B, N, 3]
 
             else:
 
-                weights_sum, depth, image = raymarching.composite_rays_train(sigmas, rgbs, deltas, rays, T_thresh)
+                weights_sum, depth, image, dex_depth = raymarching.composite_rays_train(sigmas, rgbs, deltas, rays, T_thresh, D_thresh, True)
                 image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
                 depth = torch.clamp(depth - nears, min=0) / (fars - nears)
+                dex_depth = torch.clamp(dex_depth - nears, min=0) / (fars - nears)
                 image = image.view(*prefix, 3)
                 depth = depth.view(*prefix)
+                dex_depth = dex_depth.view(*prefix)
             
+            dex_depth_raw = dex_depth.clone()
+            depth_raw = depth.clone()
             results['weights_sum'] = weights_sum
 
         else:
@@ -336,6 +346,8 @@ class NeRFRenderer(nn.Module):
             
             weights_sum = torch.zeros(N, dtype=dtype, device=device)
             depth = torch.zeros(N, dtype=dtype, device=device)
+            dex_init = 1e10
+            dex_depth = torch.ones(N, dtype=dtype, device=device) * dex_init
             image = torch.zeros(N, 3, dtype=dtype, device=device)
             
             n_alive = N
@@ -364,7 +376,8 @@ class NeRFRenderer(nn.Module):
                 # rgbs = self.color(xyzs, dirs, **density_outputs)
                 sigmas = self.density_scale * sigmas
 
-                raymarching.composite_rays(n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, image, T_thresh)
+                raymarching.composite_rays(n_alive, n_step, rays_alive, rays_t, sigmas, rgbs, deltas, weights_sum, depth, dex_depth, image, T_thresh, D_thresh)
+                dex_depth[dex_depth==dex_init] = 0.0
 
                 rays_alive = rays_alive[rays_alive >= 0]
 
@@ -374,12 +387,15 @@ class NeRFRenderer(nn.Module):
 
             image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
             depth = torch.clamp(depth - nears, min=0) / (fars - nears)
+            dex_depth_raw = dex_depth.clone()
+            dex_depth = torch.clamp(dex_depth - nears, min=0) / (fars - nears)
             image = image.view(*prefix, 3)
             depth = depth.view(*prefix)
         
         results['depth'] = depth
         results['image'] = image
-
+        results['dex_depth'] = dex_depth
+        results['dex_depth_raw'] = dex_depth_raw
         return results
 
     @torch.no_grad()
@@ -574,7 +590,7 @@ class NeRFRenderer(nn.Module):
         #print(f'[density grid] min={self.density_grid.min().item():.4f}, max={self.density_grid.max().item():.4f}, mean={self.mean_density:.4f}, occ_rate={(self.density_grid > 0.01).sum() / (128**3 * self.cascade):.3f} | [step counter] mean={self.mean_count}')
 
 
-    def render(self, rays_o, rays_d, staged=False, max_ray_batch=4096, **kwargs):
+    def render(self, rays_o, rays_d, staged=False, max_ray_batch=4096,D_thresh=10.0, d_thresh_force =None, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # return: pred_rgb: [B, N, 3]
 
@@ -585,7 +601,10 @@ class NeRFRenderer(nn.Module):
 
         B, N = rays_o.shape[:2]
         device = rays_o.device
-
+        
+        if d_thresh_force is not None:
+            D_thresh = d_thresh_force
+            
         # never stage when cuda_ray
         if staged and not self.cuda_ray:
             depth = torch.empty((B, N), device=device)
@@ -595,7 +614,7 @@ class NeRFRenderer(nn.Module):
                 head = 0
                 while head < N:
                     tail = min(head + max_ray_batch, N)
-                    results_ = _run(rays_o[b:b+1, head:tail], rays_d[b:b+1, head:tail], **kwargs)
+                    results_ = _run(rays_o[b:b+1, head:tail], rays_d[b:b+1, head:tail], D_thresh=D_thresh **kwargs)
                     depth[b:b+1, head:tail] = results_['depth']
                     image[b:b+1, head:tail] = results_['image']
                     head += max_ray_batch
@@ -605,6 +624,6 @@ class NeRFRenderer(nn.Module):
             results['image'] = image
 
         else:
-            results = _run(rays_o, rays_d, **kwargs)
+            results = _run(rays_o, rays_d, D_thresh=D_thresh, **kwargs)
 
         return results

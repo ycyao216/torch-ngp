@@ -503,9 +503,10 @@ __global__ void kernel_composite_rays_train_forward(
     const scalar_t * __restrict__ rgbs,  
     const scalar_t * __restrict__ deltas,
     const int * __restrict__ rays,
-    const uint32_t M, const uint32_t N, const float T_thresh, 
+    const uint32_t M, const uint32_t N, const float T_thresh, const float D_thresh,
     scalar_t * weights_sum,
     scalar_t * depth,
+    scalar_t * dex_depth,
     scalar_t * image
 ) {
     // parallel per ray
@@ -535,7 +536,7 @@ __global__ void kernel_composite_rays_train_forward(
     uint32_t step = 0;
 
     scalar_t T = 1.0f;
-    scalar_t r = 0, g = 0, b = 0, ws = 0, t = 0, d = 0;
+    scalar_t r = 0, g = 0, b = 0, ws = 0, t = 0, d = 0, d_dex=0;
 
     while (step < num_steps) {
 
@@ -548,7 +549,11 @@ __global__ void kernel_composite_rays_train_forward(
         
         t += deltas[1]; // real delta
         d += weight * t;
-        
+
+        if (d_dex == 0.0f && sigmas[0] > D_thresh){
+            d_dex = t;
+        }
+
         ws += weight;
         
         T *= 1.0f - alpha;
@@ -571,19 +576,20 @@ __global__ void kernel_composite_rays_train_forward(
     // write
     weights_sum[index] = ws; // weights_sum
     depth[index] = d;
+    dex_depth[index] = d_dex;
     image[index * 3] = r;
     image[index * 3 + 1] = g;
     image[index * 3 + 2] = b;
 }
 
 
-void composite_rays_train_forward(const at::Tensor sigmas, const at::Tensor rgbs, const at::Tensor deltas, const at::Tensor rays, const uint32_t M, const uint32_t N, const float T_thresh, at::Tensor weights_sum, at::Tensor depth, at::Tensor image) {
+void composite_rays_train_forward(const at::Tensor sigmas, const at::Tensor rgbs, const at::Tensor deltas, const at::Tensor rays, const uint32_t M, const uint32_t N, const float T_thresh,const float D_thresh, at::Tensor weights_sum, at::Tensor depth,at::Tensor dex_depth, at::Tensor image) {
 
     static constexpr uint32_t N_THREAD = 128;
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
     sigmas.scalar_type(), "composite_rays_train_forward", ([&] {
-        kernel_composite_rays_train_forward<<<div_round_up(N, N_THREAD), N_THREAD>>>(sigmas.data_ptr<scalar_t>(), rgbs.data_ptr<scalar_t>(), deltas.data_ptr<scalar_t>(), rays.data_ptr<int>(), M, N, T_thresh, weights_sum.data_ptr<scalar_t>(), depth.data_ptr<scalar_t>(), image.data_ptr<scalar_t>());
+        kernel_composite_rays_train_forward<<<div_round_up(N, N_THREAD), N_THREAD>>>(sigmas.data_ptr<scalar_t>(), rgbs.data_ptr<scalar_t>(), deltas.data_ptr<scalar_t>(), rays.data_ptr<int>(), M, N, T_thresh,D_thresh, weights_sum.data_ptr<scalar_t>(), depth.data_ptr<scalar_t>(), dex_depth.data_ptr<scalar_t>(),image.data_ptr<scalar_t>());
     }));
 }
 
@@ -820,12 +826,13 @@ __global__ void kernel_composite_rays(
     const uint32_t n_alive, 
     const uint32_t n_step, 
     const float T_thresh,
+    const float D_thresh,
     int* rays_alive, 
     scalar_t* rays_t, 
     const scalar_t* __restrict__ sigmas, 
     const scalar_t* __restrict__ rgbs, 
     const scalar_t* __restrict__ deltas, 
-    scalar_t* weights_sum, scalar_t* depth, scalar_t* image
+    scalar_t* weights_sum, scalar_t* depth, scalar_t* dex_depth, scalar_t* image
 ) {
     const uint32_t n = threadIdx.x + blockIdx.x * blockDim.x;
     if (n >= n_alive) return;
@@ -840,12 +847,15 @@ __global__ void kernel_composite_rays(
     rays_t += index;
     weights_sum += index;
     depth += index;
+    dex_depth += index;
     image += index * 3;
 
     scalar_t t = rays_t[0]; // current ray's t
     
     scalar_t weight_sum = weights_sum[0];
     scalar_t d = depth[0];
+    scalar_t d_dex = dex_depth[0];
+
     scalar_t r = image[0];
     scalar_t g = image[1];
     scalar_t b = image[2];
@@ -875,6 +885,9 @@ __global__ void kernel_composite_rays(
         g += weight * rgbs[1];
         b += weight * rgbs[2];
 
+        if (d_dex == 0.0f && sigmas[0] > D_thresh) {
+            d_dex = t;
+        }
         //printf("[n=%d] num_steps=%d, alpha=%f, w=%f, T=%f, sum_dt=%f, d=%f\n", n, step, alpha, weight, T, sum_delta, d);
 
         // ray is terminated if T is too small
@@ -899,16 +912,17 @@ __global__ void kernel_composite_rays(
 
     weights_sum[0] = weight_sum; // this is the thing I needed!
     depth[0] = d;
+    dex_depth[0] = d_dex;
     image[0] = r;
     image[1] = g;
     image[2] = b;
 }
 
 
-void composite_rays(const uint32_t n_alive, const uint32_t n_step, const float T_thresh, at::Tensor rays_alive, at::Tensor rays_t, at::Tensor sigmas, at::Tensor rgbs, at::Tensor deltas, at::Tensor weights, at::Tensor depth, at::Tensor image) {
+void composite_rays(const uint32_t n_alive, const uint32_t n_step, const float T_thresh, const float D_thresh, at::Tensor rays_alive, at::Tensor rays_t, at::Tensor sigmas, at::Tensor rgbs, at::Tensor deltas, at::Tensor weights, at::Tensor depth, at::Tensor dex_depth, at::Tensor image) {
     static constexpr uint32_t N_THREAD = 128;
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(
     image.scalar_type(), "composite_rays", ([&] {
-        kernel_composite_rays<<<div_round_up(n_alive, N_THREAD), N_THREAD>>>(n_alive, n_step, T_thresh, rays_alive.data_ptr<int>(), rays_t.data_ptr<scalar_t>(), sigmas.data_ptr<scalar_t>(), rgbs.data_ptr<scalar_t>(), deltas.data_ptr<scalar_t>(), weights.data_ptr<scalar_t>(), depth.data_ptr<scalar_t>(), image.data_ptr<scalar_t>());
+        kernel_composite_rays<<<div_round_up(n_alive, N_THREAD), N_THREAD>>>(n_alive, n_step, T_thresh, D_thresh, rays_alive.data_ptr<int>(), rays_t.data_ptr<scalar_t>(), sigmas.data_ptr<scalar_t>(), rgbs.data_ptr<scalar_t>(), deltas.data_ptr<scalar_t>(), weights.data_ptr<scalar_t>(), depth.data_ptr<scalar_t>(), dex_depth.data_ptr<scalar_t>(), image.data_ptr<scalar_t>());
     }));
 }

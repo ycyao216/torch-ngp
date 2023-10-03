@@ -64,6 +64,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--view-dep-density', action='store_true', help="Whether to use view d\ependent density estimation (add view to density prediction)")
     parser.add_argument('--vdd-cuda-mode', type=str, default='cas_sphere', help="The sampling type to sample view for the cascaded xyzs in cuda ray mode")
+    parser.add_argument('--d_thresh', default=2.5, type=float)
     
     parser.add_argument('--exp-tag', type=str, default='view-dep-density-exp', help="extra tag for experiment name")
     parser.add_argument('--logger-type', type=str, default='tensorboardX', help="logger type, supports (tensorboard, wandb)")
