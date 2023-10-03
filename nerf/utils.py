@@ -224,7 +224,7 @@ class NerfMeter:
         raise NotImplementedError
     
     def write(self, writer, global_step, prefix=""):
-        if self.use_wandb:
+        if self.is_wandb:
             # wandb log should not be written multiple times in the same epoch.
             self.log(f"[WARNING] Using W&B. Write should not be called. {self.name} : {self.measure()} at step {global_step} is skipped.")
             return 
