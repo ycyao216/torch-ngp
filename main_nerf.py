@@ -160,8 +160,8 @@ if __name__ == '__main__':
                 trainer.evaluate(test_loader) # blender has gt, so evaluate it.
     
             trainer.test(test_loader, write_video=True) # test and save video
-            
-            trainer.save_mesh(resolution=256, threshold=10)
+            if not opt.view_dep_density:
+                trainer.save_mesh(resolution=256, threshold=10)
     
     else:
 
@@ -195,4 +195,5 @@ if __name__ == '__main__':
             
             trainer.test(test_loader, write_video=True) # test and save video
             
-            trainer.save_mesh(resolution=256, threshold=10)
+            if not opt.view_dep_density:
+                trainer.save_mesh(resolution=256, threshold=10)
